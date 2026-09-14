@@ -1,11 +1,17 @@
 # Free Ollama API Gateway — рекомендуемая топология (§14.1)
 #
-#   cp .env.example .env   # заполните секреты
+#   ./docker-start.sh          # тоже самое + .env, секреты, TLS и ожидание готовности
+#   cp .env.example .env       # вручную: заполнить секреты
 #   docker compose up -d --build
 #
-# Компоненты: gateway (2 реплики за ingress), health-checker (единственный
-# владелец активных проверок), discovery-worker, postgres, redis,
-# metrics-exporter (Prometheus + Alertmanager).
+# Компоненты: migrate (одноразовое наведение схемы Alembic), gateway (2 реплики
+# за ingress), health-checker (единственный владелец активных проверок),
+# discovery-worker (профиль), postgres, redis, prometheus, nginx.
+#
+# Сервисов Alertmanager и Grafana здесь нет: Prometheus настраивается
+# (deploy/prometheus.yml), а дашборд импортируется в существующий Grafana
+# (deploy/grafana-dashboard.json). Контейнер redis поднят на будущее:
+# redis-бэкенд лимитов в коде пока не подключён (README «Ограничения»).
 #
 # Почему роли раздельные: при 2+ репликах шлюза каждая выполняла бы свои
 # активные health-check, и нагрузка на узлы владельцев умножилась бы на число

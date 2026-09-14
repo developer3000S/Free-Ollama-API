@@ -185,9 +185,13 @@ server:
   openai_api_enabled: true        # второй контракт /v1/* (README «OpenAI-совместимый API»)
 
 storage:
-  database_url: "{env:GATEWAY_DB_URL}"   # пусто → sqlite+aiosqlite:///data/foagw.sqlite3
-  redis_url: "{env:GATEWAY_REDIS_URL}"   # пусто → лимиты в памяти процесса
-  data_dir: "{env:FOA_DATA_DIR}"
+  # Адреса хранилища в пример не попадают: они задаются окружением, а не файлом,
+  # и перекрывают этот раздел (_compat_env/_env_overrides применяются после YAML):
+  #   GATEWAY_DB_URL / FOA_STORAGE__DATABASE_URL — DSN (пусто → sqlite+aiosqlite:///data/foagw.sqlite3)
+  #   GATEWAY_REDIS_URL / FOA_STORAGE__REDIS_URL — redis-бэкенд лимитов (пусто → память процесса)
+  #   FOA_STORAGE__DATA_DIR                      — рабочий каталог (по умолчанию data)
+  # Плейсхолдеры вида "{env:VAR}" здесь не нужны: при незаполненной переменной
+  # они обнуляют безопасные значения по умолчанию (§13).
   # Наведение схемы (README «Миграции»):
   #   create_all — значения по умолчанию, совместимость с §14.1 и стендами;
   #   alembic    — при старте выполняется `alembic upgrade head` (для прода);

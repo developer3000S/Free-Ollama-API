@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import os
 import sys
 from pathlib import Path
 
@@ -260,6 +261,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--migrate", action="store_true", help="применить Alembic-миграции (upgrade head) и выйти")
     parser.add_argument("--stamp", action="store_true", help="отметить существующую create_all-схему как head, не выполняя DDL")
     args = parser.parse_args(argv)
+
+    # Приложение строится фабрикой serve(), которая заново вызывает load_settings()
+    # и не видит аргументы CLI: пробрасываем их через окружение, иначе --config/
+    # --host/--port/--log-level применялись бы только к проверкам ниже, а не к
+    # запущенному шлюзу.
+    if args.config:
+        os.environ["FOA_CONFIG_FILE"] = str(args.config)
+    if args.host:
+        os.environ["FOA_SERVER__HOST"] = str(args.host)
+    if args.port:
+        os.environ["FOA_SERVER__PORT"] = str(args.port)
+    if args.log_level:
+        os.environ["FOA_OBSERVABILITY__LOG_LEVEL"] = str(args.log_level)
 
     try:
         settings = load_settings(args.config)

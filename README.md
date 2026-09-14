@@ -388,10 +388,11 @@ discovery:
 
 1. встроенные безопасные значения по умолчанию;
 2. `config.yaml` (`--config` / `FOA_CONFIG_FILE`) — см. [`config.example.yaml`](config.example.yaml);
-3. переменные вида `FOA_СЕКЦИЯ__КЛЮЧ` (`FOA_SECURITY__ROUTE_CANDIDATES=true`,
-   вложенно — `FOA_DISCOVERY__SOURCES__CENSYS__ENABLED=true`);
-4. совместимые переменные ТЗ §14.2 (`GATEWAY_DB_URL`, `GATEWAY_REDIS_URL`,
-   `GATEWAY_JWT_SECRET`, `GATEWAY_ID`, `CENSYS_API_ID`, …) — они **ниже** `FOA_*`.
+3. совместимые переменные ТЗ §14.2 (`GATEWAY_DB_URL`, `GATEWAY_REDIS_URL`,
+   `GATEWAY_JWT_SECRET`, `GATEWAY_ID`, `CENSYS_API_ID`, …) — они **ниже** `FOA_*`
+   и применяются, только если непустые;
+4. переменные вида `FOA_СЕКЦИЯ__КЛЮЧ` (`FOA_SECURITY__ROUTE_CANDIDATES=true`,
+   вложенно — `FOA_DISCOVERY__SOURCES__CENSYS__ENABLED=true`) — высший приоритет.
 
 Секреты в файл не пишутся: `{env:VAR}`, `{file:/path}`, `{vault:path}`,
 `{api_key_service}` (`foa/config/secretrefs.py`). Поддерживаются Vault, AWS/GCP/Azure
@@ -596,7 +597,7 @@ FOA_MIGRATIONS_ROOT=/app alembic upgrade head        # явный корень, 
 | `tests/test_units_config_logging.py` | 113 | слои конфигурации, `validate()`, secret refs, журнал (§13, §14.2, §12.5) |
 | `tests/test_units_storage.py` | 37 | репозитории: согласия (история, отзыв), кандидаты (upsert, purge), ключи, блэклист |
 | `tests/test_units_openai.py` | 31 | чистые конвертеры OpenAI ⇄ Ollama, маппинг ошибок, NDJSON→SSE (§18) |
-| `tests/test_balancing.py` | 23 | 6 алгоритмов, все лимиты и бюджеты, дисциплина повторов §7.6, обрыв клиента, `draining` |
+| `tests/test_balancing.py` | 23 | маршрутизация: `round_robin`, `weighted_round_robin`, `least_latency`, гибрид (здесь); `least_connections` и `consistent_hash` — в `test_units_runtime.py`; все лимиты и бюджеты, дисциплина повторов §7.6, обрыв клиента, `draining` |
 | `tests/test_owner_cli.py` | 21 | `foa-owner` против **реального uvicorn-шлюза**: ключи, consent-файл, TXT, JWT, локальный consent-сервер, publish/verify/revoke/delete |
 | `tests/test_openai_api.py` | 18 | `/v1/*` вживую: скоупы, consent gate, лимиты, SSE, оба формата ошибок |
 | `tests/test_consent.py` | 13 | три механизма подтверждения, срок действия, отзыв ≤5 с, self-service, изоляция чужих узлов, аудит |

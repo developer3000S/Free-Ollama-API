@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Локальное состояние (БД, секреты, логи) — никогда не коммитим
+*.sqlite3
+*.db
+data/
+logs/
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# IDE
+.idea/
+.vscode/

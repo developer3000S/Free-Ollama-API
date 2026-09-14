@@ -1,0 +1,189 @@
+# Free Ollama API Gateway — пример конфигурации (§13 ТЗ)
+#
+# Запуск:  foa-gateway --config config.example.yaml
+# Проверка: foa-gateway --config config.example.yaml --check-config
+#
+# Приоритет источников значений (§13, §14.2):
+#   встроенные безопасные значения по умолчанию < этот YAML < переменные окружения
+# Переменные окружения имеют вид FOA_СЕКЦИЯ__КЛЮЧ, например FOA_SECURITY__ROUTE_CANDIDATES=true
+# или вложенно: FOA_DISCOVERY__SOURCES__CENSYS__ENABLED=true
+#
+# СЕКРЕТЫ В ЭТОТ ФАЙЛ НЕ ПИШУТ. Для них используются ссылки на хранилище (§14.2):
+#   "{env:VAR_NAME}" | "{file:/path/to/secret}" | "{vault:path/to/secret}" | "{api_key_service}"
+# Пример: api_key: "{env:CENSYS_API_KEY}"
+
+# --------------------------------------------------------------------------- #
+# §13 — безопасный режим по умолчанию. Эти значения в ТЗ приведены дословно;
+# любой небезопасный откат блокируется на старте (ConfigError), см. §13.2.
+# --------------------------------------------------------------------------- #
+security:
+  require_consent: true          # без активного согласия узел не маршрутизируется (§5)
+  allow_unverified_nodes: false  # запрещает обход подтверждения владения (§5.3)
+  active_scanning: deny          # запрет активного сканирования чужих сетей (§4.4.1)
+  route_candidates: false        # кандидаты из discovery никогда не получают трафик (§4.4.4)
+  store_prompt_bodies: false     # промпты не сохраняются (§12.2)
+  store_response_bodies: false   # ответы не сохраняются (§12.2)
+  forward_client_ip: false       # IP клиента не раскрывается владельцу узла (§12.5.2)
+  require_tls_for_nodes: false   # true — узлы только по https (§12.6); для своих стендов
+  allow_loopback_nodes: true     # false — запрет 127.0.0.1/::1 как адресов узлов (стенд/прод)
+  client_hash_salt: ""           # соль псевдонима клиента; пусто → FOA_SECURITY__CLIENT_HASH_SALT
+
+limits:
+  requests_per_minute_per_user: 60
+  concurrent_requests_per_user: 2
+  max_prompt_bytes: 1048576
+  max_num_predict: 2048
+  max_generation_seconds: 300
+  # Дополнительные границы (§12.4.2/§12.4.3) — значения по умолчанию показаны для наглядности:
+  requests_per_minute_global: 1000
+  requests_per_minute_per_model: 20
+  max_request_bytes: 1048576
+  max_messages: 200
+  max_message_bytes: 262144
+  concurrent_stream_requests_per_user: 2
+
+health:
+  liveness_interval_seconds: 15
+  readiness_interval_seconds: 60
+  timeout_seconds: 3
+  failure_threshold: 3
+  # Раздельные пороги для живости и готовности (§6.2):
+  liveness_connect_timeout_seconds: 2.0
+  liveness_response_timeout_seconds: 3.0
+  liveness_failure_threshold: 3
+  readiness_timeout_seconds: 5.0
+  readiness_failure_threshold: 2
+  consent_recheck_interval_seconds: 86400          # перепроверка согласия не реже раза в сутки (§5.4)
+  consent_revocation_apply_seconds: 5              # отзыв должен примениться ≤5 с (§5.5)
+  passive_window_seconds: 60                       # окно пассивного наблюдения (§6.3)
+  passive_error_rate_threshold: 0.2                # 20 % ошибок → degraded (§6.4, §7.7)
+  functional_check_enabled: false                  # генерация-зонд по умолчанию ВЫКЛЮЧЕНА (§6.2.4)
+  functional_check_model: ""                       # модель для зонда (если включён)
+  functional_check_interval_seconds: 3600
+  retry_after_failure_seconds: 1.0
+
+circuit_breaker:                                   # §6.5
+  window_seconds: 30.0
+  minimum_requests: 10
+  error_rate_threshold: 0.5
+  open_duration_seconds: 60.0
+  half_open_probes: 1
+
+pool:                                              # пул соединений на каждый узел (§7.1)
+  max_connections_per_node: 10
+  max_connections_per_model_per_node: 4
+  connect_timeout_seconds: 2.0
+  read_headers_timeout_seconds: 10.0
+  full_generation_timeout_seconds: 300.0
+  keep_alive: true
+  prefer_tls: true
+
+load_balancer:
+  algorithm: least_connections_with_latency        # гибрид §7.4; также round_robin,
+  # weighted_round_robin, least_connections, least_latency, consistent_hash
+  retry_policy:                                    # §7.6 — дисциплина повторов
+    max_retries: 1
+    retry_streaming_requests: false                # потоковые запросы не повторяем
+    retry_after_upstream_started: false            # узел начал обработку → повтора нет
+  # Веса гибридного алгоритма (§7.4):
+  capacity_weight: 0.5
+  latency_weight: 0.3
+  latency_reference_ms: 30000.0
+  ewma_alpha: 0.3
+  queue_wait_timeout_seconds: 5.0
+  connection_wait_timeout_seconds: 2.0
+
+# --------------------------------------------------------------------------- #
+# Discovery (§4.4). По умолчанию выключен и работает только как инвентаризация:
+# найденные хосты становятся «кандидатами» и никогда не получают трафик, пока
+# владелец явно не зарегистрирует узел и не подтвердит владение (§4.4.4, FR-D-04).
+# Внешний ключ каждой включённой платформы обязан иметь allowed_scopes, иначе
+# запуск конфигурации завершается ошибкой (§4.4.3).
+# --------------------------------------------------------------------------- #
+discovery:
+  enabled: true
+  mode: inventory_only            # inventory_only | disabled
+  active_scanning: deny
+  auto_route_candidates: false    # запрещено ТЗ; небезопасное значение отклоняется
+  retain_days: 90                 # срок хранения кандидатов (§4.7)
+  risk_manual_review_threshold: 70
+  scan_interval_seconds: 3600
+  sources:
+    censys:
+      enabled: false
+      api_id: "{env:CENSYS_API_ID}"
+      api_secret: "{env:CENSYS_API_SECRET}"
+      allowed_scopes: []          # напр. ["asn:AS9009", "192.0.2.0/24", "*.example.com"]
+      purpose: inventory
+      cache_ttl_seconds: 86400
+      max_requests_per_minute: 10
+    greynoise:
+      enabled: false
+      api_key: "{env:GREYNOISE_API_KEY}"
+      allowed_scopes: []
+      purpose: research
+      cache_ttl_seconds: 86400
+      max_requests_per_minute: 10
+    zoomeye:
+      enabled: false
+      api_key: "{env:ZOOMEYE_API_KEY}"
+      allowed_scopes: []
+      purpose: inventory
+      cache_ttl_seconds: 86400
+      max_requests_per_minute: 10
+    natlas:
+      enabled: false
+      api_endpoint: "{env:NATLAS_API_ENDPOINT}"
+      api_key: "{env:NATLAS_API_KEY}"
+      allowed_scopes: []
+      purpose: inventory
+      cache_ttl_seconds: 86400
+      max_requests_per_minute: 10
+    criminal_ip:
+      enabled: false
+      api_key: "{env:CRIMINAL_IP_API_KEY}"
+      allowed_scopes: []
+      purpose: risk_enrichment
+      cache_ttl_seconds: 86400
+      max_requests_per_minute: 10
+
+privacy:
+  store_request_body: false
+  store_response_body: false
+  log_metadata_only: true         # в журнал попадают только метаданные (§12.5.3)
+  retention_days: 0               # 0 — не хранить содержимое сверх БД согласий
+
+# --------------------------------------------------------------------------- #
+# Аутентификация (§9.1, §9.6). Значения берутся из окружения/секрет-хранилища.
+# Пустой admin_token означает полностью закрытый админ-контур (fail-closed).
+# owner_token + owner_ref дают владельцу self-service доступ к СВОИМ узлам (§2.2).
+# --------------------------------------------------------------------------- #
+auth:
+  require_api_key: true
+  key_prefix: "foa_"
+  default_scopes: ["ollama:read", "ollama:generate"]
+  key_rotation_grace_seconds: 3600
+  admin_token: "{env:FOA_ADMIN_TOKEN}"
+  auditor_token: "{env:FOA_AUDITOR_TOKEN}"
+  owner_token: "{env:FOA_OWNER_TOKEN}"
+  owner_ref: "{env:FOA_OWNER_REF}"
+  bcrypt_like_pepper: "{env:FOA_KEY_PEPPER}"
+
+observability:
+  metrics_enabled: true
+  metrics_path: /metrics
+  log_level: INFO
+  log_format: json
+  log_requests: true              # access-лог метаданных (§11.3)
+  trace_enabled: false
+
+server:
+  host: 127.0.0.1                 # в Docker/compose — 0.0.0.0
+  port: 8080
+  api_prefix: ""                  # напр. "/v1/ollama" (§9.1)
+  graceful_shutdown_seconds: 30
+
+storage:
+  database_url: "{env:GATEWAY_DB_URL}"   # пусто → sqlite+aiosqlite:///data/foagw.sqlite3
+  redis_url: "{env:GATEWAY_REDIS_URL}"   # пусто → лимиты в памяти процесса
+  data_dir: "{env:FOA_DATA_DIR}"

@@ -1,0 +1,223 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "built": "2026-09-14T00:00:00Z",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "enable": true,
+        "height": 1,
+        "hide": 0,
+        "limit": 100,
+        "name": "",
+        "showIn": 0,
+        "tags": [],
+        "type": "list"
+      }
+    ]
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "RPS",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(gateway_requests_total[1m]))",
+          "legendFormat": "всего"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (status) (rate(gateway_requests_total[1m]))",
+          "legendFormat": "HTTP {{status}}"
+        }
+      ]
+    },
+    {
+      "title": "Ошибки узлов (§11.4 gateway_upstream_errors_total)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (node_id, kind) (rate(gateway_upstream_errors_total[5m]))",
+          "legendFormat": "{{node_id}} {{kind}}"
+        }
+      ]
+    },
+    {
+      "title": "Длительность запросов, p50/p95/p99",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(gateway_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(gateway_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(gateway_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "title": "Отклонено лимитами (§12.4.2)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (scope) (rate(gateway_rate_limited_total[5m]))",
+          "legendFormat": "{{scope}}"
+        }
+      ]
+    },
+    {
+      "title": "Активные соединения до узлов (§7.1)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (node_id) (gateway_active_upstream_connections)",
+          "legendFormat": "{{node_id}}"
+        }
+      ]
+    },
+    {
+      "title": "Состояние узлов (1 = в этом состоянии)",
+      "description": "node_health_status {node_id,state}: healthy/degraded/unhealthy/quarantined (§6, §7.7)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (state) (node_health_status)",
+          "legendFormat": "{{state}}"
+        }
+      ]
+    },
+    {
+      "title": "Согласия: маршрутизируемые vs активные (§5.4)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (state) (node_consent_status)",
+          "legendFormat": "{{state}}"
+        }
+      ]
+    },
+    {
+      "title": "Задержка применения отзыва согласия (§5.5, цель ≤5 с)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [
+        { "color": "green", "value": null },
+        { "color": "red", "value": 5 }
+      ] } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(consent_revocation_lag_seconds_bucket[15m])))",
+          "legendFormat": "p99 задержка отзыва"
+        }
+      ]
+    },
+    {
+      "title": "Блэклист (§12.4.4)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "refId": "A", "expr": "max(node_blacklist_total)", "legendFormat": "в блэклисте" }
+      ]
+    },
+    {
+      "title": "Кандидаты discovery (§4.4 — трафик не получают)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "refId": "A", "expr": "max(discovery_candidate_queue_size)", "legendFormat": "в очереди" }
+      ]
+    },
+    {
+      "title": "Circuit breaker по узлам (§6.5, 1=open)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (node_id) (node_circuit_breaker_state)",
+          "legendFormat": "{{node_id}}"
+        }
+      ]
+    },
+    {
+      "title": "Доля 5xx от шлюза",
+      "type": "gauge",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "thresholds": { "steps": [
+        { "color": "green", "value": null },
+        { "color": "yellow", "value": 0.01 },
+        { "color": "red", "value": 0.05 }
+      ] } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(gateway_requests_total{status=~\"5..\"}[5m])) / clamp_min(sum(rate(gateway_requests_total[5m])), 1e-9)",
+          "legendFormat": "5xx доля"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["free-ollama-api-gateway", "consent", "ollama"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "label": "Prometheus",
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "browser",
+  "title": "Free Ollama API Gateway (§11.4)",
+  "uid": "foa-gateway",
+  "version": 1
+}

@@ -1,0 +1,128 @@
+# Free Ollama API Gateway — рекомендуемая топология (§14.1)
+#
+#   cp .env.example .env   # заполните секреты
+#   docker compose up -d --build
+#
+# Компоненты: gateway (2 реплики за ingress), health-checker (единственный
+# владелец активных проверок), discovery-worker, postgres, redis,
+# metrics-exporter (Prometheus + Alertmanager).
+#
+# Почему роли раздельные: при 2+ репликах шлюза каждая выполняла бы свои
+# активные health-check, и нагрузка на узлы владельцев умножилась бы на число
+# реплик (§6.1). Проксирующие реплики только перечитывают реестр из БД
+# (server.run_background_loops=false), что сохраняет применение отзыва согласия
+# в пределах health.consent_revocation_apply_seconds (§5.5).
+#
+# ВНИМАНИЕ: наружу должен выходить только nginx-ingress с TLS. Прямой доступ к
+# gateway/health-checker/prometheus оставьте внутри сети (ports не публикуются).
+
+name: free-ollama-api-gateway
+
+x-gateway-common: &gateway-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: free-ollama-api-gateway:1.0.0
+  restart: unless-stopped
+  env_file: [.env]
+  environment: &gateway-env
+    FOA_SERVER__HOST: 0.0.0.0
+    FOA_SERVER__PORT: "8080"
+    FOA_STORAGE__DATABASE_URL: postgresql+asyncpg://foa:${POSTGRES_PASSWORD:?задайте в .env}@postgres:5432/foa
+    FOA_STORAGE__REDIS_URL: redis://redis:6379/0
+    # Проксирующая роль: фоновые циклы ведут отдельные сервисы.
+    FOA_SERVER__RUN_BACKGROUND_LOOPS: "false"
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  networks: [foa]
+  # Сетевая сегментация (§14.1): узлы владельцев не имеют доступа к БД и redis.
+  # egress разрешён только к адресам узлов, зарегистрированных в реестре.
+
+services:
+  # -- точка входа для пользователей -------------------------------------- #
+  gateway-a:
+    <<: *gateway-common
+    deploy:
+      replicas: 1
+  gateway-b:
+    <<: *gateway-common
+    environment:
+      <<: *gateway-env
+
+  health-checker:
+    <<: *gateway-common
+    environment:
+      <<: *gateway-env
+      FOA_SERVER__RUN_BACKGROUND_LOOPS: "true"
+      FOA_DISCOVERY__ENABLED: "false"
+
+  discovery-worker:
+    <<: *gateway-common
+    environment:
+      <<: *gateway-env
+      FOA_SERVER__RUN_BACKGROUND_LOOPS: "true"
+      # Инвентаризация: кандидаты сохраняются, но трафик не получают (§4.4.4).
+      FOA_DISCOVERY__MODE: inventory_only
+    profiles: ["discovery"]   # включается явно: docker compose --profile discovery up
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: foa
+      POSTGRES_USER: foa
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?задайте в .env}
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U foa -d foa"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [foa]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: ["redisdata:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [foa]
+
+  # -- наблюдаемость (§11.4) ----------------------------------------------- #
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    restart: unless-stopped
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - metricsdata:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    networks: [foa]
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "443:443"           # TLS обязателен: пользовательский API наружу без TLS не выпускаем
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/tls:/etc/nginx/tls:ro
+    depends_on: [gateway-a, gateway-b]
+    networks: [foa]
+
+networks:
+  foa:
+    driver: bridge
+
+volumes:
+  pgdata:
+  redisdata:
+  metricsdata:

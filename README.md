@@ -91,17 +91,21 @@ Prometheus и nginx с TLS. Быстрый путь — скрипт `docker-sta
 все предварительные шаги сам:
 
 ```bash
-./docker-start.sh                      # .env + секреты + TLS-сертификат + сборка + up -d
-./docker-start.sh --no-build           # без пересборки образа
+./docker-start.sh                      # .env + секреты + TLS → очистка → сборка без кэша → up -d
+./docker-start.sh --no-build           # поднять существующий образ (очистка и сборка пропускаются)
 ./docker-start.sh --profile discovery  # + worker инвентаризации (трафик не маршрутизируется)
-./docker-start.sh down                 # остановить (тома, .env и сертификаты сохраняются)
+./docker-start.sh down                 # остановить (тома, образы, .env и сертификаты сохраняются)
 ```
 
 Скрипт создаёт `.env` из `.env.example`, генерирует пустые секреты через
 `openssl rand` (значения в вывод не печатаются), выпускает самоподписанный
-сертификат в `deploy/tls/` — без него nginx не поднимется — и ждёт, пока контейнер
-шлюза перейдёт в `healthy` (штатный `HEALTHCHECK` образа). Ручной запуск тоже
-поддерживается:
+сертификат в `deploy/tls/` — без него nginx не поднимется. Перед сборкой
+останавливает прежний стек и удаляет образы, собранные этим compose-проектом
+(базовые `postgres`/`redis`/`nginx`/`prometheus` не трогает: на общей машине их
+может переиспользовать другой проект), затем собирает их с `--no-cache --pull` —
+иначе слой `requirements.txt` взял бы из кэша старый набор пакетов — и ждёт, пока
+контейнер шлюза перейдёт в `healthy` (штатный `HEALTHCHECK` образа). Ручной
+запуск тоже поддерживается:
 
 ```bash
 cp .env.example .env    # обязательно: POSTGRES_PASSWORD, FOA_ADMIN_TOKEN, ...
@@ -670,7 +674,7 @@ tests/              665 тестов (быстрый прогон: -m "not slow"
 | `.env.example` | переменные окружения §14.2 (копировать в `.env`, не коммитить) |
 | `Dockerfile` | multi-stage, nonroot-пользователь, `HEALTHCHECK` на `/healthz`, миграции в образе |
 | `docker-compose.yml` | топология §14.1: 2 реплики шлюза, health-checker, discovery-worker (профиль), postgres, redis, prometheus, nginx |
-| `docker-start.sh` | запуск стека в Docker одной командой: `.env` с секретами, TLS-сертификат, сборка, ожидание готовности; `down` — остановка |
+| `docker-start.sh` | запуск стека в Docker одной командой: `.env` с секретами, TLS-сертификат, очистка старых образов проекта, сборка без кэша, ожидание готовности; `down` — остановка |
 | `update.sh` | `git add . && git commit && git push origin main` — см. [предупреждение](#ограничения-и-что-не-реализовано) |
 
 Точки входа: `foa-gateway` (`foa.app:main`) и `foa-owner` (`foa.cli.owner:main`).

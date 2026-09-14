@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from foa.core.appstate import AppState
+from foa.domain import openai as oa
 from foa.domain.enums import REQUEST_ID_HEADER, ErrorCode, Scope
 from foa.domain.errors import ErrorPayload, ForbiddenError, GatewayError, InvalidRequestError, UnauthorizedError
 from foa.ids import request_id as new_request_id
@@ -68,9 +69,23 @@ async def authenticate_user(request: Request, state: AppState = Depends(get_stat
 
 
 def require_scope(scope: str):
+    return require_any_scope(scope)
+
+
+def require_any_scope(*scopes: str):
+    """Доступен любой из перечисленных скоупов (§9.2).
+
+    Нужен для эндпоинтов, которые одинаково правильно вызываются с «генерация»
+    и «эмбеддинги» (``/api/embed`` принимает текст как чат-промпт, так и
+    эмбеддируемый вход) — требовать от ключа оба скоупа значило бы отказывать
+    легитимному запросу (§17.4: отказ только по отсутствии аутентификации или
+    реально недостающего права).
+    """
+
     async def _dep(principal: Principal = Depends(authenticate_user)) -> Principal:
-        if scope not in principal.scopes:
-            raise ForbiddenError(f"ключу не выдан скоуп {scope}", details={"scope": scope})
+        if not principal.scopes.intersection(scopes):
+            required = " или ".join(scopes)
+            raise ForbiddenError(f"ключу не выдан ни один из скоупов: {required}", details={"any_of": list(scopes)})
         return principal
 
     return _dep
@@ -79,6 +94,7 @@ def require_scope(scope: str):
 require_read = require_scope(Scope.OLLAMA_READ.value)
 require_generate = require_scope(Scope.OLLAMA_GENERATE.value)
 require_embed = require_scope(Scope.OLLAMA_EMBED.value)
+require_generate_or_embed = require_any_scope(Scope.OLLAMA_GENERATE.value, Scope.OLLAMA_EMBED.value)
 
 
 async def _peek_stream_flag(request: Request, limit: int) -> bool:
@@ -97,6 +113,12 @@ async def _peek_stream_flag(request: Request, limit: int) -> bool:
     return isinstance(data, dict) and bool(data.get("stream"))
 
 
+async def _hold_user_slot(request: Request, state: AppState, principal: Principal):
+    stream = await _peek_stream_flag(request, state.settings.limits.max_request_bytes)
+    async with state.ratelimit.user_slot(principal.key_id, stream=stream, limit=principal.concurrent_requests):
+        yield principal
+
+
 async def generation_slot(
     request: Request,
     principal: Principal = Depends(require_generate),
@@ -107,9 +129,18 @@ async def generation_slot(
     Для StreamingResponse выход зависимости выполняется после последнего байта,
     поэтому длительные потоки тоже попадают под лимит.
     """
-    stream = await _peek_stream_flag(request, state.settings.limits.max_request_bytes)
-    async with state.ratelimit.user_slot(principal.key_id, stream=stream, limit=principal.concurrent_requests):
-        yield principal
+    async for held in _hold_user_slot(request, state, principal):
+        yield held
+
+
+async def embedding_slot(
+    request: Request,
+    principal: Principal = Depends(require_generate_or_embed),
+    state: AppState = Depends(get_state),
+):
+    """Слот для эмбеддингов: ``ollama:embed`` либо ``ollama:generate`` (§9.2)."""
+    async for held in _hold_user_slot(request, state, principal):
+        yield held
 
 
 async def authenticate_admin(request: Request, state: AppState = Depends(get_state), *, write: bool = False) -> Principal:
@@ -133,12 +164,25 @@ async def admin_write(request: Request, state: AppState = Depends(get_state)) ->
 
 
 
-def error_response(payload: ErrorPayload, headers: dict[str, str] | None = None) -> JSONResponse:
+def error_response(payload: ErrorPayload, headers: dict[str, str] | None = None, *, openai: bool = False) -> JSONResponse:
     headers = dict(headers or {})
     headers.setdefault(REQUEST_ID_HEADER, payload.request_id)
     if payload.retry_after is not None:
         headers.setdefault("Retry-After", str(int(payload.retry_after)))
-    return JSONResponse(status_code=payload.status_code, content=payload.to_json(), headers=headers)
+    content = oa.error_payload_as_openai(payload) if openai else payload.to_json()
+    return JSONResponse(status_code=payload.status_code, content=content, headers=headers)
+
+
+def wants_openai_errors(request: Request) -> bool:
+    """Ошибки ``/v1/*`` отдаются в конверте OpenAI (§18).
+
+    Формат выбирается по пути запроса, поэтому Ollama-контракт (§9.5) и админ API
+    остаются с ``{"error","code",…}`` — конвертация не зависит от того, какая
+    служба породила ошибку.
+    """
+    settings = getattr(getattr(request.app, "state", None), "settings", None)
+    prefix = getattr(getattr(settings, "server", None), "api_prefix", "") or ""
+    return oa.is_openai_path(request.url.path, prefix)
 
 
 async def gateway_error_handler(request: Request, exc: GatewayError) -> JSONResponse:
@@ -156,7 +200,7 @@ async def gateway_error_handler(request: Request, exc: GatewayError) -> JSONResp
             }
         },
     )
-    return error_response(payload)
+    return error_response(payload, openai=wants_openai_errors(request))
 
 
 async def validation_error_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -170,7 +214,7 @@ async def validation_error_handler(request: Request, exc: Exception) -> JSONResp
         payload = ErrorPayload(ErrorCode.INVALID_REQUEST, message, request_id=rid, details={"fields": fields})
     else:  # pragma: no cover - прочие валидации
         payload = ErrorPayload(ErrorCode.INVALID_REQUEST, "invalid request", request_id=rid)
-    return error_response(payload)
+    return error_response(payload, openai=wants_openai_errors(request))
 
 
 async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -182,7 +226,7 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
         extra={"foa": {"event": "http.unhandled", "request_id": rid, "path": request.url.path, "type": type(exc).__name__}},
     )
     payload = ErrorPayload(ErrorCode.SERVER_ERROR, "internal server error", request_id=rid)
-    return error_response(payload)
+    return error_response(payload, openai=wants_openai_errors(request))
 
 
 async def read_json_body(request: Request, limit: int) -> dict[str, Any]:
@@ -229,16 +273,21 @@ __all__ = [
     "bind_request_context",
     "client_ip",
     "db_session",
+    "embedding_slot",
     "error_response",
     "gateway_error_handler",
+    "generation_slot",
     "get_state",
     "perf_now",
     "read_json_body",
     "request_id_of",
+    "require_any_scope",
     "require_embed",
     "require_generate",
+    "require_generate_or_embed",
     "require_read",
     "require_scope",
     "unhandled_error_handler",
     "validation_error_handler",
+    "wants_openai_errors",
 ]

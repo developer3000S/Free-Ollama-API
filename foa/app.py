@@ -23,7 +23,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from foa import __version__
-from foa.api import admin, user
+from foa.api import admin, openai, user
 from foa.api.deps import (
     gateway_error_handler,
     unhandled_error_handler,
@@ -141,8 +141,13 @@ def create_app(settings: Settings | None = None, *, state: AppState | None = Non
         # Совместимость с Ollama (§9.1): поддерживаем и корневые, и префиксные пути.
         app.include_router(user.router, prefix=prefix)
         app.include_router(admin.router, prefix=prefix)
+        if settings.server.openai_api_enabled:
+            app.include_router(openai.router, prefix=prefix)
     app.include_router(user.router)
     app.include_router(admin.router)
+    if settings.server.openai_api_enabled:
+        # Второй контракт (§18): OpenAI-совместимые /v1/* поверх того же consent gate.
+        app.include_router(openai.router)
 
     _register_operational_routes(app, settings)
 
@@ -196,8 +201,13 @@ async def startup(app: FastAPI, settings: Settings, state: AppState | None = Non
     """Инициализация БД, синхронизация пула, запуск фоновых циклов."""
     if settings.storage.data_dir:
         Path(settings.storage.data_dir).mkdir(parents=True, exist_ok=True)
+    mode = settings.storage.migrations
+    if mode == "alembic":
+        from foa.storage.migrations import apply_migrations
+
+        await apply_migrations(settings.storage.database_url)
     engine = init_engine(settings.storage.database_url)
-    await init_db(engine)
+    await init_db(engine, create_schema=mode != "alembic")
     state = state or build_services(settings)
     state.session_factory = get_session_factory()
     app.state.foa = state
@@ -247,6 +257,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log-level", default=None)
     parser.add_argument("--print-config", action="store_true", help="показать действующую конфигурацию и выйти")
     parser.add_argument("--check-config", action="store_true", help="проверить конфигурацию и выйти")
+    parser.add_argument("--migrate", action="store_true", help="применить Alembic-миграции (upgrade head) и выйти")
+    parser.add_argument("--stamp", action="store_true", help="отметить существующую create_all-схему как head, не выполняя DDL")
     args = parser.parse_args(argv)
 
     try:
@@ -256,6 +268,21 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.check_config:
         print("конфигурация корректна: безопасный режим по умолчанию (§13)")
+        return 0
+    if args.migrate or args.stamp:
+        import asyncio
+
+        from foa.storage.migrations import apply_migrations, stamp_head
+
+        try:
+            if args.stamp:
+                asyncio.run(stamp_head(settings.storage.database_url))
+            else:
+                asyncio.run(apply_migrations(settings.storage.database_url))
+        except Exception as exc:
+            print(f"миграции не выполнены: {exc}", file=sys.stderr)
+            return 2
+        print("схема отмечена как head (DDL не выполнялся)" if args.stamp else "миграции применены: схема БД обновлена до head")
         return 0
     if args.print_config:
         import json

@@ -18,7 +18,11 @@ RUN groupadd --system --gid 10001 foa && useradd --system --uid 10001 --gid foa 
     && apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /install /usr/local
-ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 FOA_SERVER__HOST=0.0.0.0 FOA_SERVER__PORT=8080
+# Alembic-миграции (README «Миграции»): нужны для storage.migrations=alembic
+# и для отдельного шага `docker compose run --rm gateway-a --migrate`.
+COPY alembic.ini ./
+COPY migrations ./migrations
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 FOA_SERVER__HOST=0.0.0.0 FOA_SERVER__PORT=8080 FOA_MIGRATIONS_ROOT=/app
 USER foa
 EXPOSE 8080
 VOLUME ["/app/data"]

@@ -176,6 +176,38 @@ async def test_forbidden_owner_operations_return_403(gateway):
     assert response.status_code == 403
 
 
+async def test_embed_scope_alone_grants_both_embedding_endpoints(gateway, fake_node_primary):
+    """§9.2 — `ollama:embed` = «Создание эмбеддингов» для /api/embeddings и /api/embed."""
+    headers = await gateway.use_user_key(scopes=["ollama:embed"])
+    await gateway.onboard(fake_node_primary, models=["llama3.1"])
+
+    response = await gateway.client.post("/api/embeddings", headers=headers, json={"model": "llama3.1", "prompt": "x"})
+    assert response.status_code == 200, response.text
+    assert response.json()["embedding"] == [0.11, 0.22, 0.33]
+
+    response = await gateway.client.post("/api/embed", headers=headers, json={"model": "llama3.1", "input": ["a", "b"]})
+    assert response.status_code == 200, response.text
+    assert len(response.json()["embeddings"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("scopes", "path", "body"),
+    [
+        (["ollama:read"], "/api/embeddings", {"model": "llama3.1", "prompt": "x"}),
+        (["ollama:read"], "/api/embed", {"model": "llama3.1", "input": "a"}),
+        (["ollama:embed"], "/api/generate", {"model": "llama3.1", "prompt": "x"}),
+    ],
+)
+async def test_embedding_and_generation_scopes_are_separate(gateway, scopes, path, body):
+    """§9.2/§17.4 — отсутствующий скоуп даёт 403 FORBIDDEN, а не 400/404."""
+    headers = await gateway.use_user_key(scopes=scopes)
+    response = await gateway.client.post(path, headers=headers, json=body)
+    assert response.status_code == 403, response.text
+    payload = response.json()
+    assert payload["code"] == "FORBIDDEN"
+    assert "ollama:embed" in str(payload["details"]) or "ollama:generate" in str(payload["details"])
+
+
 async def test_client_supplied_request_id_is_honored(gateway, fake_node_primary):
     headers = await gateway.use_user_key(scopes=["ollama:generate"])
     await gateway.onboard(fake_node_primary)

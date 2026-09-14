@@ -21,6 +21,7 @@ from foa import GATEWAY_VERSION
 from foa.api.deps import (
     authenticate_user,
     db_session,
+    embedding_slot,
     generation_slot,
     get_state,
     read_json_body,
@@ -28,7 +29,6 @@ from foa.api.deps import (
     require_read,
 )
 from foa.core.appstate import AppState
-from foa.domain.enums import Scope
 from foa.domain.errors import (
     GatewayError,
     InvalidRequestError,
@@ -371,13 +371,11 @@ async def api_chat(
 async def api_embeddings(
     request: Request,
     state: AppState = Depends(get_state),
-    principal: Principal = Depends(generation_slot),
+    principal: Principal = Depends(embedding_slot),
     session: AsyncSession = Depends(db_session),
 ) -> JSONResponse:
     body = await read_json_body(request, state.settings.limits.max_request_bytes)
     parsed = _parse(EmbeddingsRequest, body)
-    if Scope.OLLAMA_EMBED.value not in principal.scopes and Scope.OLLAMA_GENERATE.value not in principal.scopes:
-        raise InvalidRequestError("ключу не выдан скоуп ollama:embed")
     ctx, decision = await _gate(request, state, principal, session, model=parsed.model)
     state.ratelimit.enforce_generation_budget(None, len(parsed.prompt.encode("utf-8")))
     result = await state.proxy.request_json(
@@ -392,7 +390,7 @@ async def api_embeddings(
 async def api_embed(
     request: Request,
     state: AppState = Depends(get_state),
-    principal: Principal = Depends(generation_slot),
+    principal: Principal = Depends(embedding_slot),
     session: AsyncSession = Depends(db_session),
 ) -> JSONResponse:
     body = await read_json_body(request, state.settings.limits.max_request_bytes)

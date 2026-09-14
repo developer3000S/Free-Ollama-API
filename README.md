@@ -17,6 +17,7 @@
 - [Что это и зачем](#что-это-и-зачем)
 - [Быстрый старт](#быстрый-старт)
 - [Пользовательский API](#пользовательский-api)
+- [OpenAI-совместимый API (`/v1/*`)](#openai-совместимый-api-v1)
 - [Владелец узла: согласие за 5 минут](#владелец-узла-согласие-за-5-минут)
 - [Администратор: реестр, ключи, отзыв](#администратор-реестр-ключи-отзыв)
 - [Discovery (§4)](#discovery-4)
@@ -163,6 +164,66 @@ curl -s -X POST http://127.0.0.1:8080/api/generate \
 не повторяются после первого байта — ошибка отдаётся в поток как
 `{"error":…,"code":"UPSTREAM_ERROR"}`. `X-FOA-Request-ID` сохраняется на всех
 попытках.
+
+---
+
+## OpenAI-совместимый API (`/v1/*`)
+
+Второй контракт поверх того же Ollama API (§18 п.1: «OpenAI-совместимый API как
+второй контракт»). Это **не** отдельная маршрутизация и не обходной путь: запрос
+конвертируется в телеграммы `/api/*`, поэтому к нему применяются те же скоупы,
+лимиты, бюджеты, повторная дисциплина и, главное, consent gate — узел без
+активного согласия не получит запрос и через `/v1/*` (проверено
+`test_openai_respects_consent_gate`).
+
+```bash
+curl -s https://gw.example.com/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"llama3.1","messages":[{"role":"user","content":"Привет"}],"stream":true}'
+```
+
+| Эндпоинт | Отображается на | Требует скоуп |
+|---|---|---|
+| `GET /v1/models` | `GET /api/tags` (агрегат, без адресов узлов) | `ollama:read` |
+| `GET /v1/models/{id}` | тот же агрегат | `ollama:read` |
+| `POST /v1/chat/completions` | `POST /api/chat` | `ollama:generate` |
+| `POST /v1/completions` | `POST /api/generate` | `ollama:generate` |
+| `POST /v1/embeddings` | `POST /api/embed` | `ollama:embed` или `ollama:generate` |
+
+Отключается одной строкой: `server.openai_api_enabled: false`
+(`FOA_SERVER__OPENAI_API_ENABLED=false`) — Ollama API при этом не затрагивается.
+
+**Формат ошибок** выбирается по пути запроса: `/v1/*` отвечаются конвертом
+OpenAI (`{"error": {"message","type","param","code"}}`, где `type` —
+`authentication_error`, `permission_denied`, `rate_limit_error`,
+`invalid_request_error`, `api_error`), а `/api/*` и `/admin/*` сохраняют
+совместимый с Ollama формат §9.5 (`error`, `code`, `request_id`). Оба формата
+несут один и тот же HTTP-статус, `Retry-After` и `X-FOA-Request-ID`
+(проверено `test_ollama_contract_error_format_unchanged`).
+
+**Потоки:** Ollama NDJSON → SSE `chat.completion.chunk` без буферизации:
+первый чанк с `delta.role`, дельты контента, финальный чанк с `finish_reason`,
+`data: [DONE]`. `stream_options.include_usage: true` добавляет отдельный
+финальный чанк с пустыми `choices` и `usage`. Обрыв upstream после первого
+байта (§7.6 — повтор уже невозможен) отдаётся объектом ошибки внутри потока,
+а не молча оборванным SSE.
+
+**Маппинг параметров:** `max_tokens`/`max_completion_tokens` → `options.num_predict`,
+`temperature` → `temperature`, `top_p` → `top_p`, `stop` → `stop`,
+`presence_penalty`/`frequency_penalty` → одноимённые, `seed` → `seed`,
+`role: developer` → `role: system`, `response_format: json_object` →
+`format: "json"`, `response_format: json_schema` → `format: <schema>`,
+`tools` → `tools` (Ollama-формат), мультимодальные `image_url` c `data:` URI →
+`images`. Поле `user` не пересылается: узлу не передаётся идентификатор клиента
+(§8.5.3), как и в Ollama-контракте.
+
+**Что честно не поддерживается** и отклоняется с `unsupported parameter(s)`
+(§17.7 — молчаливое игнорирование хуже отказа): `n>1`, `logprobs`, `top_logprobs`,
+`encoding_format: base64`, неизвестные `response_format.type`. Неизвестные поля
+контракта (`store`, `metadata`, `service_tier`) отбрасываются: payload для узла
+собирается явным списком, поэтому произвольный параметр на узел не уходит
+(§12.4.5). Внешние `http(s)`-ссылки в `image_url` не пересылаются — их скачивал
+бы узел, что было бы SSRF из чужого процесса (§12.5.1).
 
 ---
 
@@ -402,26 +463,51 @@ consent_revocation_apply_seconds` (иначе §5.5 невыполним).
 
 ## Миграции
 
-Схема БД описана в `foa/storage/models.py` (SQLAlchemy 2.0, `Base.metadata`), и
-при старте вызывается `init_db()` → `Base.metadata.create_all`
-(`foa/storage/db.py`).
+Схема БД описана в `foa/storage/models.py` (SQLAlchemy 2.0, `Base.metadata`),
+Alembic подключён: `alembic.ini` + `migrations/` с начальной ревизией
+`initial schema`. Способ наведения схемы выбирается параметром
+`storage.migrations`:
 
-**Alembic в этом проекте не подключён**: нет `alembic.ini` и каталога
-`migrations/`, ревизий не существует. `create_all` создаёт таблицы только если их
-нет и **не изменяет** существующие, поэтому:
+| Значение | Поведение |
+|---|---|
+| `create_all` (по умолчанию) | `init_db()` вызывает `Base.metadata.create_all` — совместимо с §14.1 и локальными стендами |
+| `alembic` | при старте выполняется `alembic upgrade head`, `create_all` не вызывается |
+| `off` | шлюз схему не трогает вообще — наводит оператор отдельным шагом |
 
-- для нового развёртывания этого достаточно;
-- **обновление на новой версии требует ручной миграции схемы** — сверьте
-  `Base.metadata` с фактической схемой (например, `sqlalchemy.inspect`) и
-  примените `ALTER TABLE` сами, на копии БД и с резервной копией;
-- перед подготовкой продакшен-развёртывания с регулярными апгрейдами стоит
-  инициализировать Alembic (`alembic init migrations`, автогенерация по
-  `Base.metadata`) и заменить `create_all` на `alembic upgrade head` —
-  модуль `foa/storage/db.py` на это указывает в докстринге.
+Команды:
+
+```bash
+.venv/bin/alembic upgrade head                       # через CLI (URL из GATEWAY_DB_URL)
+.venv/bin/alembic check                              # схема == модели? (для CI)
+.venv/bin/foa-gateway --config config.yaml --migrate # upgrade head из конфигурации шлюза и выход
+.venv/bin/foa-gateway --config config.yaml --stamp   # отметить существующую create_all-схему как head
+FOA_MIGRATIONS_ROOT=/app alembic upgrade head        # явный корень, если cwd ≠ корень проекта
+```
+
+**Переход с `create_all` на `alembic` — отдельное явное действие.** В БД, созданной
+`create_all`, таблицы есть, а `alembic_version` нет, поэтому Alembic считает её
+«base» и попытается создать таблицы заново. Шлюз такую ситуация не угадывает:
+`apply_migrations` блокирует upgrade с сообщением, указывающим на `--stamp`
+(проверено `test_legacy_create_all_database_blocks_upgrade_until_stamped`).
+Порядок апгрейда: резервная копия → `--migrate` на копии → сверка → `--stamp`/
+`--migrate` на рабочей БД.
+
+Новая ревизия после изменения моделей:
+
+```bash
+.venv/bin/alembic revision --autogenerate -m "что изменилось"
+```
+
+`migrations/env.py` передаёт `compare_type=True` и кастомный `render_item` для
+типа `UTCDateTime`, а для SQLite включает `render_as_batch` (полноценного
+`ALTER TABLE` у него нет — таблица пересоздаётся). URL берётся из той же цепочки
+приоритетов §13/§14.2, что и у шлюза: `ALEMBIC_DB_URL` → `GATEWAY_DB_URL` →
+`storage.database_url`.
 
 Для SQLite при подключении включаются `journal_mode=WAL`, `foreign_keys=ON`,
 `busy_timeout=30000` — без них конкурентные записи из фоновых циклов упирались
 бы в блокировки.
+
 
 ---
 
@@ -472,9 +558,13 @@ consent_revocation_apply_seconds` (иначе §5.5 невыполним).
 
 ```bash
 .venv/bin/pip install -e '.[dev]'          # pytest, ruff, mypy
-.venv/bin/python -m pytest tests/ -q       # 600 тестов (unit + интеграционные + CLI)
+.venv/bin/python -m pytest tests/ -q              # 665 тестов
+.venv/bin/python -m pytest tests/ -q -m "not slow" # 659: без нагрузочных §15.2
+.venv/bin/python -m pytest tests/ -q -m security   # проверки §15.3
+.venv/bin/python -m pytest tests/ -q -m ethics     # проверки §15.4
 .venv/bin/python -m ruff check .           # All checks passed! (line-length 130)
 .venv/bin/python -m mypy foa               # опционально, настройки в pyproject.toml
+.venv/bin/python -m alembic check          # схема == models (защита от drift)
 ```
 
 Распределение тестов по файлам:
@@ -484,17 +574,28 @@ consent_revocation_apply_seconds` (иначе §5.5 невыполним).
 | `tests/test_units_core.py` | 242 | ID, скоупы, crypto, схемы, ошибки, утилиты (§12.4.1, §4.6) |
 | `tests/test_units_runtime.py` | 131 | runtime-состояние узла, circuit breaker, алгоритмы балансировки (§6.3, §6.5, §7) |
 | `tests/test_units_config_logging.py` | 113 | слои конфигурации, `validate()`, secret refs, журнал (§13, §14.2, §12.5) |
+| `tests/test_units_storage.py` | 37 | репозитории: согласия (история, отзыв), кандидаты (upsert, purge), ключи, блэклист |
+| `tests/test_units_openai.py` | 31 | чистые конвертеры OpenAI ⇄ Ollama, маппинг ошибок, NDJSON→SSE (§18) |
 | `tests/test_balancing.py` | 23 | 6 алгоритмов, все лимиты и бюджеты, дисциплина повторов §7.6, обрыв клиента, `draining` |
 | `tests/test_owner_cli.py` | 21 | `foa-owner` против **реального uvicorn-шлюза**: ключи, consent-файл, TXT, JWT, локальный consent-сервер, publish/verify/revoke/delete |
+| `tests/test_openai_api.py` | 18 | `/v1/*` вживую: скоупы, consent gate, лимиты, SSE, оба формата ошибок |
 | `tests/test_consent.py` | 13 | три механизма подтверждения, срок действия, отзыв ≤5 с, self-service, изоляция чужих узлов, аудит |
+| `tests/test_end_to_end.py` | 13 | полный жизненный цикл: регистрация → согласие → трафик; потоки; отказ `pull/push/...`; скоупы эмбеддингов; валидность поставляемого `config.example.yaml` |
 | `tests/test_health.py` | 11 | отсутствие проверок до согласия, `401`/`403` → блэклист, деградация по пассивным ошибкам, выключенный functional-зонд |
-| `tests/test_end_to_end.py` | 9 | полный жизненный цикл: регистрация → согласие → трафик; потоки; отказ `pull/push/...`; валидность поставляемого `config.example.yaml` |
-| `tests/test_units_storage.py` | 37 | репозитории: согласия (история, отзыв), кандидаты (upsert, purge), ключи, блэклист |
+| `tests/test_load.py` | 6 | §15.2 (`slow`): пиковая нагрузка, очередь при занятом узле, недоступность узлов, утечки соединений/слотов, обрывы стримов под нагрузкой |
+| `tests/test_migrations.py` | 6 | Alembic: начальная ревизия == модели, `alembic check` без drift, блокировка легаси-БД до `--stamp`, старт с `migrations: alembic` |
 
-Маркеры `security` (§15.3), `ethics` (§15.4) и `slow` (§15.2) объявлены в
-`pyproject.toml` (`--strict-markers`), но ни один тест их не несёт: проверки
-безопасности и этики выполняются обычными тестами (см. таблицу выше и критерии §17),
-а отдельных нагрузочных сценариев в наборе нет.
+Маркеры назначаются централизованно в `tests/conftest.py` (`pytest_collection_modifyitems`
+по базовому имени теста, поэтому параметризованные случаи размечаются целиком):
+
+| Маркер | Тестов | Источник разметки |
+|---|---|---|
+| `security` | 213 | §15.3: SSRF, аутентификация/авторизация, криптография, маскирование секретов, инъекции, небезопасная конфигурация, защита обоих контрактов |
+| `ethics` | 37 | §15.4: согласие как условие маршрутизации (включая `/v1/*`), запрет активных сканов, отзыв ≤5 с, удаление данных, ограниченные модели |
+| `slow` | 6 | §15.2: нагрузочные тесты (`tests/test_load.py` проставляет сам) |
+
+Быстрый прогон CI: `pytest -m "not slow"`; отдельные срезы —
+`pytest -m security`, `pytest -m ethics`.
 
 ---
 
@@ -505,7 +606,7 @@ consent_revocation_apply_seconds` (иначе §5.5 невыполним).
 | 1 | Запросы не уходят на узлы без подтверждённого согласия | `ROUTABLE_STATES` + `balancer.eligible()`; `test_full_lifecycle_consent_then_traffic`, `test_no_active_checks_before_consent`, `test_consent_limited_models_are_enforced` |
 | 2 | Узлы с `401`/`403` немедленно исключаются и блокируются | `test_auth_error_blacklists_node_immediately`, `test_forbidden_from_node_blacklists`, `test_blacklisted_endpoint_cannot_register` |
 | 3 | Отзыв согласия применяется ≤5 с | `consent_revocation_apply_seconds` + `_registry_sync_loop()`; `test_revocation_stops_traffic_within_five_seconds`; метрика `consent_revocation_lag_seconds` |
-| 4 | Все пользовательские запросы аутентифицированы | `require_api_key`, `deps.authenticate_user` (401 без Bearer-ключа); `test_user_endpoints_require_authentication`, `test_invalid_credentials_are_rejected` |
+| 4 | Все пользовательские запросы аутентифицированы | `security.require_api_key`, `deps.authenticate_user` (401 без Bearer-ключа); `test_user_endpoints_require_authentication`, `test_invalid_credentials_are_rejected`, `test_openai_endpoints_require_authentication` |
 | 5 | Действуют лимиты частоты, объёма и длительности | `foa/services/ratelimit.py`, `limits.*`; `test_rate_limit_per_user`, `test_concurrency_limit_per_user`, `test_generation_budget_limits`, `test_daily_token_quota`, `test_node_hourly_request_budget` |
 | 6 | Потоки корректно проксируются и прерываются | `proxy.stream_ndjson`; `test_streaming_generate_is_proxied_ndjson`, `test_streaming_chat_and_client_abort`, `test_stream_aborted_when_client_disconnects` |
 | 7 | Ошибки в совместимом формате | `ErrorPayload.to_json()`; проверки `error`/`code`/`request_id` в e2e-тестах, `test_no_healthy_nodes_returns_503`, `test_unknown_model_returns_404` |
@@ -520,21 +621,25 @@ consent_revocation_apply_seconds` (иначе §5.5 невыполним).
 ```
 foa/
   app.py            FastAPI-фабрика, lifespan, /healthz|/readyz|/metrics, CLI foa-gateway
-  api/              user.py (§9.3), admin.py (§9.6), deps.py (аутентификация, скоупы),
+  api/              user.py (§9.3), openai.py (/v1/*, §18), admin.py (§9.6),
+                    deps.py (аутентификация, скоупы, формат ошибок),
                     middleware.py (request-id, access-лог §12.5.3)
   config/           §13 + §14.2: слои значений, fail-fast validate(), secret refs
   core/appstate.py  DI-контейнер служб, фоновые циклы (роль §14.1)
-  domain/           enums (состояния, скоупы, коды ошибок), errors (§9.5), schemas (pydantic v2)
+  domain/           enums (состояния, скоупы, коды ошибок), errors (§9.5),
+                    schemas (pydantic v2), openai.py (контракт /v1 и конвертеры)
   net/              client.py (пулы httpx на узел, маппинг ошибок), security.py (SSRF, IP)
   services/         nodes (реестр), consent (§5), health (§6), balancer (§7),
                     proxy (§8), ratelimit (§12.4), auth (§9.1, §12.4.1),
                     state (рантайм-нагрузка), crypto (Ed25519, хэши), discovery/ (§4)
-  storage/          models.py, repositories.py, db.py (async engine)
+  storage/          models.py, repositories.py, db.py (async engine),
+                    migrations.py (программный Alembic)
   observability/    metrics.py (§11.4)
   logging/          JSON-журнал с минимальным набором полей (§12.5)
   cli/owner.py      владельческий CLI (foa-owner)
+migrations/         alembic: env.py (async + render_item + batch), versions/
 deploy/             nginx.conf, prometheus.yml, grafana-dashboard.json
-tests/              600 тестов
+tests/              665 тестов (быстрый прогон: -m "not slow")
 ```
 
 Файлы проекта:
@@ -544,9 +649,10 @@ tests/              600 тестов
 | `ТЗ.md` | техническое задание, на которое ссылаются номера разделов в этом README и в комментариях кода |
 | `pyproject.toml` | пакет, зависимости, console-scripts, настройки pytest/ruff/mypy |
 | `requirements.txt` | runtime-зависимости (используются слоем builder в `Dockerfile`) |
+| `alembic.ini` + `migrations/` | миграции схемы (раздел «Миграции») |
 | `config.example.yaml` | пример конфигурации §13, загружается как есть — проверяется тестом |
 | `.env.example` | переменные окружения §14.2 (копировать в `.env`, не коммитить) |
-| `Dockerfile` | multi-stage, nonroot-пользователь, `HEALTHCHECK` на `/healthz` |
+| `Dockerfile` | multi-stage, nonroot-пользователь, `HEALTHCHECK` на `/healthz`, миграции в образе |
 | `docker-compose.yml` | топология §14.1: 2 реплики шлюза, health-checker, discovery-worker (профиль), postgres, redis, prometheus, nginx |
 | `update.sh` | `git add . && git commit && git push origin main` — см. [предупреждение](#ограничения-и-что-не-реализовано) |
 
@@ -556,18 +662,26 @@ tests/              600 тестов
 
 ## Ограничения и что не реализовано
 
-- **Alembic не подключён** — см. [Миграции](#миграции).
-- **OpenAI-совместимый API отсутствует**: ТЗ требует только Ollama-контракт (§9.3), а
-  вопрос его поддержки в §18 оставлен открытым.
+- **У OpenAI-контракта нет части полей**: `n>1`, `logprobs`, `tools` с полным
+  протоколом tool-calls, `audio`/`images`-генерация, `assistants`, `runs`,
+  `realtime`. Неподдерживаемые параметры отклоняются явно (§17.7), а не
+  игнорируются молча — см. [OpenAI-совместимый API](#openai-совместимый-api-v1).
+- **Точность `usage` для потоков** ограничена тем, что возвращает Ollama в
+  финальном NDJSON-событии (`eval_count`); `prompt_tokens` в стриме может быть 0,
+  если узел его не сообщил.
 - **Распределённые трассировки** выключены по умолчанию (`observability.trace_enabled:
   false`); `/admin/config` показывает действующую конфигурацию, версионирование
   конфигурации сводится к файлу + аудит-событию `config.reloaded`.
 - **Владельческие уведомления** о жалобах реализованы как приём
   `POST /admin/abuse-reports` и запись в аудит; канал доставки (e-mail, webhook) —
   открытый вопрос §18.
-- **Нагрузочные тесты §15.2** в наборе отсутствуют (маркер `slow` объявлен, но не
-  используется): целевую нагрузку RPS и p95-задержку надо измерять отдельно, до
-  выпуска в продакшен.
+- **Нагрузочные тесты §15.2** покрывают поведение (пик, очередь, отказы, утечки,
+  обрывы), но не целевые абсолютные числа из §15.2 («≥ N RPS», «p95 ≤ M мс»):
+  они зависят от железа, поэтому измерять их надо на реальном контуре — набор
+  помечен `slow` и excluded из быстрого прогона.
+- **Миграция данных** (не схемы) не автоматизирована: `nodes.secret`-полей нет,
+  но при изменении формата `capability`-документа потребуется сверка вручную.
 - `update.sh` выполняет `git add .` → `git commit` → `git push origin main`. Не
   запускайте его с заполненным `.env`: `git add .` попытается отправить секреты
   в GitHub (`.gitignore` исключает `.env`, но проверяйте `git status` перед коммитом).
+

@@ -215,6 +215,9 @@ class ServerConfig:
     #: Интервал перечитывания реестра в проксирующем режиме (сек). Гарантирует,
     #: что отзыв согласия дойдёт до всех реплик не позже consent_revocation_apply_seconds.
     registry_sync_interval_seconds: float = 2.0
+    #: Второй контракт — OpenAI-совместимые ``/v1/*`` (README «OpenAI-совместимый API»).
+    #: Отключение не влияет на Ollama API и на consent gate.
+    openai_api_enabled: bool = True
 
 
 @dataclass
@@ -224,6 +227,11 @@ class StorageConfig:
     database_url: str = "sqlite+aiosqlite:///data/foagw.sqlite3"
     redis_url: str = ""  # пусто → локальные in-memory лимиты/кэш
     data_dir: str = "data"
+    #: Способ создания схемы: create_all (совместимость с §14.1 и стендами),
+    #: alembic (upgrade head на старте, см. README «Миграции»), off (миграции
+    #: наводит оператор отдельным шагом — `foa-gateway --migrate`).
+    migrations: str = "create_all"
+
 
 
 @dataclass
@@ -288,6 +296,10 @@ class Settings:
             )
         if not self.privacy.log_metadata_only and not self.security.store_prompt_bodies:
             raise ConfigError("privacy.log_metadata_only=false требует явного security.store_prompt_bodies (§12.5.2)")
+        if self.storage.migrations not in {"create_all", "alembic", "off"}:
+            raise ConfigError(
+                f"storage.migrations={self.storage.migrations!r}: допустимы create_all, alembic или off (README «Миграции»)"
+            )
         for name, value in (
             ("limits.max_prompt_bytes", self.limits.max_prompt_bytes),
             ("limits.max_num_predict", self.limits.max_num_predict),

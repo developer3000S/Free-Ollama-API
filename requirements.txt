@@ -7,6 +7,7 @@ pydantic-settings>=2.3
 pyyaml>=6.0
 sqlalchemy>=2.0
 aiosqlite>=0.20
+alembic>=1.13
 prometheus-client>=0.20
 cryptography>=42.0
 PyJWT>=2.8

@@ -1,8 +1,8 @@
 """Движок БД и сессии (§14.1).
 
 По умолчанию — локальный SQLite (aiosqlite), в продакшене Postgres через
-``GATEWAY_DB_URL``. Схема создаётся автоматически; для реальных развёртываний
-предусмотрен Alembic (см. README, «Миграции»).
+``GATEWAY_DB_URL``. Способ наведения схемы выбирается ``storage.migrations``:
+``create_all`` (значение по умолчанию) или Alembic (см. README, «Миграции»).
 """
 
 from __future__ import annotations
@@ -53,13 +53,18 @@ def _enable_sqlite_integrity(engine: AsyncEngine) -> None:
         cursor.close()
 
 
-async def init_db(engine: AsyncEngine) -> None:
-    """Создаёт таблицы, включает WAL/ FK для SQLite."""
+async def init_db(engine: AsyncEngine, *, create_schema: bool = True) -> None:
+    """Создаёт таблицы, включает WAL/ FK для SQLite.
+
+    ``create_schema=False`` — схема наведена Alembic (``storage.migrations=alembic``),
+    нужны только pragma-слушатели.
+    """
     if engine.dialect.name == "sqlite":
         _enable_sqlite_integrity(engine)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    log.info("storage: схема БД готова (%s)", engine.dialect.name)
+    if create_schema:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    log.info("storage: схема БД готова (%s, create_all=%s)", engine.dialect.name, create_schema)
 
 
 def get_engine() -> AsyncEngine:

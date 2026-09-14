@@ -30,6 +30,9 @@ x-gateway-common: &gateway-common
     FOA_SERVER__PORT: "8080"
     FOA_STORAGE__DATABASE_URL: postgresql+asyncpg://foa:${POSTGRES_PASSWORD:?задайте в .env}@postgres:5432/foa
     FOA_STORAGE__REDIS_URL: redis://redis:6379/0
+    # Схема наводится одноразовым сервисом migrate (см. ниже), поэтому реплики
+    # сами DDL не выполняют: иначе N реплик одновременно гоняют alembic upgrade.
+    FOA_STORAGE__MIGRATIONS: "off"
     # Проксирующая роль: фоновые циклы ведут отдельные сервисы.
     FOA_SERVER__RUN_BACKGROUND_LOOPS: "false"
   depends_on:
@@ -37,11 +40,28 @@ x-gateway-common: &gateway-common
       condition: service_healthy
     redis:
       condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
   networks: [foa]
   # Сетевая сегментация (§14.1): узлы владельцев не имеют доступа к БД и redis.
   # egress разрешён только к адресам узлов, зарегистрированных в реестре.
 
 services:
+  # -- наведение схемы (Alembic, README «Миграции») ------------------------ #
+  # Одноразовый шаг: поднимает схему до head и завершается. Реплики шлюза
+  # запускаются только после его успешного завершения.
+  migrate:
+    <<: *gateway-common
+    restart: "no"
+    command: ["--migrate"]
+    environment:
+      <<: *gateway-env
+      # Для этого шага схема наводится именно миграциями, а не create_all.
+      FOA_STORAGE__MIGRATIONS: "alembic"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # -- точка входа для пользователей -------------------------------------- #
   gateway-a:
     <<: *gateway-common

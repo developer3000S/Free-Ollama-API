@@ -7,6 +7,10 @@ pydantic-settings>=2.3
 pyyaml>=6.0
 sqlalchemy>=2.0
 aiosqlite>=0.20
+# Драйвер Postgres обязателен: контейнерная топология §14.1 (docker-compose.yml)
+# работает только на Postgres — при SQLite реплики шлюза не имеют общего
+# состояния, а одноразовый шаг migrate не наведёт схему в общем каталоге.
+asyncpg>=0.29
 alembic>=1.13
 prometheus-client>=0.20
 cryptography>=42.0

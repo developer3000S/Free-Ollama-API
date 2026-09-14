@@ -131,7 +131,10 @@ services:
     image: nginx:1.27-alpine
     restart: unless-stopped
     ports:
-      - "443:443"           # TLS обязателен: пользовательский API наружу без TLS не выпускаем
+      # TLS обязателен: пользовательский API наружу без TLS не выпускаем.
+      # Порт на хосте задаётся FOA_HTTPS_PORT в .env (по умолчанию 443):
+      # docker-start.sh переключает его на 8443, если 443 занят другим сервисом.
+      - "${FOA_HTTPS_PORT:-443}:443"
     volumes:
       - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./deploy/tls:/etc/nginx/tls:ro

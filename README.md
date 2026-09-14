@@ -57,9 +57,9 @@
 git clone git@github.com:developer3000S/Free-Ollama-API.git
 cd Free-Ollama-API
 python3.11 -m venv .venv
-.venv/bin/pip install -e .            # зависимости из pyproject.toml
+.venv/bin/pip install -e .            # зависимости из pyproject.toml (включая драйвер asyncpg)
 # опционально: .venv/bin/pip install -e '.[dev]'   (pytest, ruff, mypy)
-# опционально: .venv/bin/pip install -e '.[postgres,redis]'  для прода
+# опционально: .venv/bin/pip install -e '.[redis]'  — пакет для redis-бэкенда лимитов (см. «Ограничения»)
 ```
 
 Конфигурация для знакомства — стартовый стенд на локальном SQLite, без секретов:
@@ -87,7 +87,21 @@ cp .env.example .env                  # заполните токены и GATEW
 `FOA_CONFIG_FILE` (по умолчанию `./config.yaml`, его отсутствие — не ошибка).
 
 Контейнеризованная топология (§14.1) — 2 реплики шлюза, отдельный health-checker,
-Prometheus и nginx с TLS:
+Prometheus и nginx с TLS. Быстрый путь — скрипт `docker-start.sh`, который делает
+все предварительные шаги сам:
+
+```bash
+./docker-start.sh                      # .env + секреты + TLS-сертификат + сборка + up -d
+./docker-start.sh --no-build           # без пересборки образа
+./docker-start.sh --profile discovery  # + worker инвентаризации (трафик не маршрутизируется)
+./docker-start.sh down                 # остановить (тома, .env и сертификаты сохраняются)
+```
+
+Скрипт создаёт `.env` из `.env.example`, генерирует пустые секреты через
+`openssl rand` (значения в вывод не печатаются), выпускает самоподписанный
+сертификат в `deploy/tls/` — без него nginx не поднимется — и ждёт, пока контейнер
+шлюза перейдёт в `healthy` (штатный `HEALTHCHECK` образа). Ручной запуск тоже
+поддерживается:
 
 ```bash
 cp .env.example .env    # обязательно: POSTGRES_PASSWORD, FOA_ADMIN_TOKEN, ...
@@ -445,7 +459,9 @@ consent_revocation_apply_seconds` (иначе §5.5 невыполним).
    не могут иметь общее состояние; SQLite годится только для одиночного стенда.
 2. **Redis** (`GATEWAY_REDIS_URL`) — иначе rate-limit, конкурентность и квоты
    (`foa/services/ratelimit.py`) действуют в масштабе одного процесса, то есть
-   фактические лимиты пользователя растут числом реплик.
+   фактические лимиты пользователя растут числом реплик. **Пока не подключён:**
+   redis-клиент нигде не создаётся, так что пункт работает как описание цели —
+   см. [Ограничения](#ограничения-и-что-не-реализовано).
 3. **Отзыв согласия ≤5 с (§5.5, §17.3)** обеспечивается не рестартом, а
    перечитыванием реестра: `registry_sync_interval_seconds` обязан быть меньше
    `health.consent_revocation_apply_seconds` — это проверяется на старте.
@@ -654,6 +670,7 @@ tests/              665 тестов (быстрый прогон: -m "not slow"
 | `.env.example` | переменные окружения §14.2 (копировать в `.env`, не коммитить) |
 | `Dockerfile` | multi-stage, nonroot-пользователь, `HEALTHCHECK` на `/healthz`, миграции в образе |
 | `docker-compose.yml` | топология §14.1: 2 реплики шлюза, health-checker, discovery-worker (профиль), postgres, redis, prometheus, nginx |
+| `docker-start.sh` | запуск стека в Docker одной командой: `.env` с секретами, TLS-сертификат, сборка, ожидание готовности; `down` — остановка |
 | `update.sh` | `git add . && git commit && git push origin main` — см. [предупреждение](#ограничения-и-что-не-реализовано) |
 
 Точки входа: `foa-gateway` (`foa.app:main`) и `foa-owner` (`foa.cli.owner:main`).
@@ -681,6 +698,11 @@ tests/              665 тестов (быстрый прогон: -m "not slow"
   помечен `slow` и excluded из быстрого прогона.
 - **Миграция данных** (не схемы) не автоматизирована: `nodes.secret`-полей нет,
   но при изменении формата `capability`-документа потребуется сверка вручную.
+- **Redis-бэкенд лимитов не подключён**: `RedisLimitBackend`
+  (`foa/services/ratelimit.py`) реализован, но `RateLimiter` собирается в
+  `foa/app.py` без redis-клиента, поэтому `GATEWAY_REDIS_URL` сейчас ни на что
+  не влияет и лимиты остаются попроцессными (см. пункт 2 «Масштабирования»).
+  Сервис `redis` в compose поднят на будущее и пока бездействует.
 - `update.sh` выполняет `git add .` → `git commit` → `git push origin main`. Не
   запускайте его с заполненным `.env`: `git add .` попытается отправить секреты
   в GitHub (`.gitignore` исключает `.env`, но проверяйте `git status` перед коммитом).

@@ -20,6 +20,9 @@ dependencies = [
     "pyyaml>=6.0",
     "sqlalchemy>=2.0",
     "aiosqlite>=0.20",
+    # Драйвер Postgres в основном списке: контейнерная топология §14.1 работает
+    # только на Postgres, и образ (requirements.txt) ставит его всегда.
+    "asyncpg>=0.29",
     "alembic>=1.13",
     "prometheus-client>=0.20",
     "cryptography>=42.0",
